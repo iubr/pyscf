@@ -47,8 +47,10 @@ class CasidaTDDFT(TDDFT, TDA):
     '''Solve the Casida TDDFT formula (A-B)(A+B)(X+Y) = (X+Y)w^2
     '''
     init_guess = TDA.init_guess
+    # TODO: should there be an if-statement here to see if CVS is enabled?
+    init_guess_cvs = TDA.init_guess_cvs
 
-    def gen_vind(self, mf=None):
+    def gen_vind(self, mf=None, cvs_space=None):
         if mf is None:
             mf = self._scf
         wfnsym = self.wfnsym
@@ -66,6 +68,11 @@ class CasidaTDDFT(TDDFT, TDA):
         nvir = len(viridx)
         orbv = mo_coeff[:,viridx]
         orbo = mo_coeff[:,occidx]
+
+        if cvs_space is not None:
+            occidx = occidx[cvs_space]
+            nocc = len(occidx)
+            orbo = mo_coeff[:,occidx]
 
         if wfnsym is not None and mol.symmetry:
             if isinstance(wfnsym, str):
@@ -101,7 +108,7 @@ class CasidaTDDFT(TDDFT, TDA):
 
         return vind, hdiag
 
-    def kernel(self, x0=None, nstates=None):
+    def kernel(self, x0=None, nstates=None, cvs_space=None):
         '''TDDFT diagonalization solver
         '''
         cpu0 = (lib.logger.process_clock(), lib.logger.perf_counter())
@@ -118,7 +125,7 @@ class CasidaTDDFT(TDDFT, TDA):
 
         log = lib.logger.Logger(self.stdout, self.verbose)
 
-        vind, hdiag = self.gen_vind(self._scf)
+        vind, hdiag = self.gen_vind(self._scf, cvs_space=cvs_space)
         precond = self.get_precond(hdiag)
 
         def pickeig(w, v, nroots, envs):
@@ -126,7 +133,10 @@ class CasidaTDDFT(TDDFT, TDA):
             return w[idx], v[:,idx], idx
 
         if x0 is None:
-            x0 = self.init_guess(self._scf, self.nstates)
+            if cvs_space is None:
+                x0 = self.init_guess(self._scf, self.nstates)
+            else:
+                x0 = self.init_guess_cvs(self._scf, self.nstates, cvs_space=cvs_space)
 
         self.converged, w2, x1 = \
                 lib.davidson1(vind, x0, precond,
@@ -140,6 +150,9 @@ class CasidaTDDFT(TDDFT, TDA):
         mo_occ = self._scf.mo_occ
         occidx = numpy.where(mo_occ==2)[0]
         viridx = numpy.where(mo_occ==0)[0]
+        if cvs_space is not None:
+            occidx = occidx[cvs_space]
+            self._cvs_space = cvs_space
         e_ia = (mo_energy[viridx,None] - mo_energy[occidx]).T
         e_ia = numpy.sqrt(e_ia)
         def norm_xy(w, z):

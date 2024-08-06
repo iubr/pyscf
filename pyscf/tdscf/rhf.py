@@ -104,8 +104,84 @@ def gen_tda_operation(mf, fock_ao=None, singlet=True, wfnsym=None):
         return v1ov.reshape(v1ov.shape[0],-1)
 
     return vind, hdiag
-gen_tda_hop = gen_tda_operation
 
+def gen_tda_operation_cvs(mf, fock_ao=None, singlet=True, wfnsym=None, cvs_space=None):
+    '''Generate function to compute A x, but for the core-valence separation approximation.
+
+    Kwargs:
+        wfnsym : int or str
+            Point group symmetry irrep symbol or ID for excited CIS wavefunction.
+        cvs_space: int list
+            The indices of core orbitals (for the core-valence sparation approximation to
+            calculate X-ray absorption spectra)
+    '''
+    mol = mf.mol
+    mo_coeff = mf.mo_coeff
+    # assert (mo_coeff.dtype == numpy.double)
+    mo_energy = mf.mo_energy
+    mo_occ = mf.mo_occ
+    nao, nmo = mo_coeff.shape
+    occidx = numpy.where(mo_occ==2)[0]
+    if cvs_space is None:
+        # revert to regular
+        coreidx = occidx
+    else:
+        coreidx = occidx[cvs_space]
+    viridx = numpy.where(mo_occ==0)[0]
+    ncore = len(coreidx)
+    nvir = len(viridx)
+    orbv = mo_coeff[:,viridx]
+    orbc = mo_coeff[:,coreidx]
+
+    # TODO: test for coreidx
+    if wfnsym is not None and mol.symmetry:
+        if isinstance(wfnsym, str):
+            wfnsym = symm.irrep_name2id(mol.groupname, wfnsym)
+        wfnsym = wfnsym % 10  # convert to D2h subgroup
+        orbsym = hf_symm.get_orbsym(mol, mo_coeff)
+        orbsym_in_d2h = numpy.asarray(orbsym) % 10  # convert to D2h irreps
+        sym_forbid = (orbsym_in_d2h[coreidx,None] ^ orbsym_in_d2h[viridx]) != wfnsym
+
+    if fock_ao is None:
+        #dm0 = mf.make_rdm1(mo_coeff, mo_occ)
+        #fock_ao = mf.get_hcore() + mf.get_veff(mol, dm0)
+        fcc = numpy.diag(mo_energy[coreidx])
+        fvv = numpy.diag(mo_energy[viridx])
+    else:
+        fock = reduce(numpy.dot, (mo_coeff.conj().T, fock_ao, mo_coeff))
+        fcc = fock[coreidx[:,None],coreidx]
+        fvv = fock[viridx[:,None],viridx]
+
+    hdiag = fvv.diagonal() - fcc.diagonal()[:,None]
+    if wfnsym is not None and mol.symmetry:
+        hdiag[sym_forbid] = 0
+    hdiag = hdiag.ravel()
+
+    mo_coeff = numpy.asarray(numpy.hstack((orbc,orbv)), order='F')
+    vresp = mf.gen_response(singlet=singlet, hermi=0)
+
+    def vind(zs):
+        zs = numpy.asarray(zs).reshape(-1,ncore,nvir)
+        if wfnsym is not None and mol.symmetry:
+            zs = numpy.copy(zs)
+            zs[:,sym_forbid] = 0
+
+        # *2 for double occupancy
+        dmov = lib.einsum('xov,qv,po->xpq', zs*2, orbv.conj(), orbc)
+        v1ao = vresp(dmov)
+        v1cv = lib.einsum('xpq,po,qv->xov', v1ao, orbc.conj(), orbv)
+        v1cv += lib.einsum('xqs,sp->xqp', zs, fvv)
+        v1cv -= lib.einsum('xpr,sp->xsr', zs, fcc)
+        if wfnsym is not None and mol.symmetry:
+            v1cv[:,sym_forbid] = 0
+        return v1cv.reshape(v1cv.shape[0],-1)
+
+    return vind, hdiag
+
+gen_tda_hop = gen_tda_operation
+gen_tda_hop_cvs = gen_tda_operation_cvs
+
+# TODO: test with CVS
 def get_ab(mf, mo_energy=None, mo_coeff=None, mo_occ=None):
     r'''A and B matrices for TDDFT response function.
 
@@ -227,6 +303,7 @@ def get_ab(mf, mo_energy=None, mo_coeff=None, mo_occ=None):
 
     return a, b
 
+# TODO: test with CVS
 def get_nto(tdobj, state=1, threshold=OUTPUT_THRESHOLD, verbose=None):
     r'''
     Natural transition orbital analysis.
@@ -381,7 +458,10 @@ def analyze(tdobj, verbose=None):
     else:
         x_sym = None
 
-    f_oscillator = tdobj.oscillator_strength()
+    if tdobj.xy[0][0].shape[0] != nocc: # CVS calculation
+        f_oscillator = tdobj.oscillator_strength(cvs_space=tdobj._cvs_space)
+    else:
+        f_oscillator = tdobj.oscillator_strength()
     for i, ei in enumerate(tdobj.e):
         x, y = tdobj.xy[i]
         if x_sym is None:
@@ -444,38 +524,50 @@ def analyze_wfnsym(tdobj, x_sym, x):
     return wfnsym
 
 
-def transition_dipole(tdobj, xy=None):
+def transition_dipole(tdobj, xy=None, cvs_space=None):
     '''Transition dipole moments in the length gauge'''
     mol = tdobj.mol
     with mol.with_common_orig(_charge_center(mol)):
         ints = mol.intor_symmetric('int1e_r', comp=3)
-    return tdobj._contract_multipole(ints, hermi=True, xy=xy)
+    if cvs_space is None:
+        return tdobj._contract_multipole(ints, hermi=True, xy=xy)
+    else:
+        return tdobj._contract_multipole(ints, hermi=True, xy=xy, cvs_space=cvs_space)
 
-def transition_velocity_dipole(tdobj, xy=None):
+def transition_velocity_dipole(tdobj, xy=None, cvs_space=None):
     '''Transition dipole moments in the velocity gauge (imaginary part only)
     '''
     ints = tdobj.mol.intor('int1e_ipovlp', comp=3, hermi=2)
-    v = tdobj._contract_multipole(ints, hermi=False, xy=xy)
+    if cvs_space is None:
+        v = tdobj._contract_multipole(ints, hermi=False, xy=xy)
+    else:
+        v = tdobj._contract_multipole(ints, hermi=False, xy=xy, cvs_space=cvs_space)
     return -v
 
-def transition_magnetic_dipole(tdobj, xy=None):
+def transition_magnetic_dipole(tdobj, xy=None, cvs_space=None):
     '''Transition magnetic dipole moments (imaginary part only)'''
     mol = tdobj.mol
     with mol.with_common_orig(_charge_center(mol)):
         ints = mol.intor('int1e_cg_irxp', comp=3, hermi=2)
-    m_pol = tdobj._contract_multipole(ints, hermi=False, xy=xy)
+    if cvs_space is None:
+        m_pol = tdobj._contract_multipole(ints, hermi=False, xy=xy)
+    else:
+        m_pol = tdobj._contract_multipole(ints, hermi=False, xy=xy, cvs_space=cvs_space)
     return -m_pol
 
-def transition_quadrupole(tdobj, xy=None):
+def transition_quadrupole(tdobj, xy=None, cvs_space=None):
     '''Transition quadrupole moments in the length gauge'''
     mol = tdobj.mol
     nao = mol.nao_nr()
     with mol.with_common_orig(_charge_center(mol)):
         ints = mol.intor('int1e_rr', comp=9, hermi=0).reshape(3,3,nao,nao)
-    quad = tdobj._contract_multipole(ints, hermi=True, xy=xy)
+    if cvs_space is None:
+        quad = tdobj._contract_multipole(ints, hermi=True, xy=xy)
+    else:
+        quad = tdobj._contract_multipole(ints, hermi=True, xy=xy, cvs_space=cvs_space)
     return quad
 
-def transition_velocity_quadrupole(tdobj, xy=None):
+def transition_velocity_quadrupole(tdobj, xy=None, cvs_space=None):
     '''Transition quadrupole moments in the velocity gauge (imaginary part only)
     '''
     mol = tdobj.mol
@@ -483,10 +575,13 @@ def transition_velocity_quadrupole(tdobj, xy=None):
     with mol.with_common_orig(_charge_center(mol)):
         ints = mol.intor('int1e_irp', comp=9, hermi=0).reshape(3,3,nao,nao)
     ints = ints + ints.transpose(1,0,3,2)
-    quad = tdobj._contract_multipole(ints, hermi=True, xy=xy)
+    if cvs_space is None:
+        quad = tdobj._contract_multipole(ints, hermi=True, xy=xy)
+    else:
+        quad = tdobj._contract_multipole(ints, hermi=True, xy=xy, cvs_space=cvs_space)
     return -quad
 
-def transition_magnetic_quadrupole(tdobj, xy=None):
+def transition_magnetic_quadrupole(tdobj, xy=None, cvs_space=None):
     '''Transition magnetic quadrupole moments (imaginary part only)'''
     XX, XY, XZ, YX, YY, YZ, ZX, ZY, ZZ = range(9)
     mol = tdobj.mol
@@ -497,19 +592,25 @@ def transition_magnetic_quadrupole(tdobj, xy=None):
     with mol.with_common_orig(_charge_center(mol)):
         ints = mol.intor('int1e_irpr', comp=27, hermi=0).reshape(9,3,nao,nao)
     m_ints += ints[[YZ,ZX,XY]] - ints[[ZY,XZ,YX]]
-    m_quad = tdobj._contract_multipole(m_ints, hermi=True, xy=xy)
+    if cvs_space is None:
+        m_quad = tdobj._contract_multipole(m_ints, hermi=True, xy=xy)
+    else:
+        m_quad = tdobj._contract_multipole(m_ints, hermi=True, xy=xy, cvs_space=cvs_space)
     return -m_quad
 
-def transition_octupole(tdobj, xy=None):
+def transition_octupole(tdobj, xy=None, cvs_space=None):
     '''Transition octupole moments in the length gauge'''
     mol = tdobj.mol
     nao = mol.nao_nr()
     with mol.with_common_orig(_charge_center(mol)):
         ints = mol.intor('int1e_rrr', comp=27, hermi=0).reshape(3,3,3,nao,nao)
-    o_pol = tdobj._contract_multipole(ints, hermi=True, xy=xy)
+    if cvs_space is None:
+        o_pol = tdobj._contract_multipole(ints, hermi=True, xy=xy)
+    else:
+        o_pol = tdobj._contract_multipole(ints, hermi=True, xy=xy, cvs_space=cvs_space)
     return o_pol
 
-def transition_velocity_octupole(tdobj, xy=None):
+def transition_velocity_octupole(tdobj, xy=None, cvs_space=None):
     '''Transition octupole moments in the velocity gauge (imaginary part only)
     '''
     mol = tdobj.mol
@@ -519,7 +620,10 @@ def transition_velocity_octupole(tdobj, xy=None):
     ints = ints + ints.transpose(2,1,0,4,3)
     with mol.with_common_orig(_charge_center(mol)):
         ints += mol.intor('int1e_irpr', comp=27, hermi=0).reshape(3,3,3,nao,nao)
-    o_pol = tdobj._contract_multipole(ints, hermi=True, xy=xy)
+    if cvs_space is None:
+        o_pol = tdobj._contract_multipole(ints, hermi=True, xy=xy)
+    else:
+        o_pol = tdobj._contract_multipole(ints, hermi=True, xy=xy, cvs_space=cvs_space)
     return -o_pol
 
 def _charge_center(mol):
@@ -527,12 +631,16 @@ def _charge_center(mol):
     coords  = mol.atom_coords()
     return numpy.einsum('z,zr->r', charges, coords)/charges.sum()
 
-def _contract_multipole(tdobj, ints, hermi=True, xy=None):
+def _contract_multipole(tdobj, ints, hermi=True, xy=None, cvs_space=None):
     if xy is None: xy = tdobj.xy
     mo_coeff = tdobj._scf.mo_coeff
     mo_occ = tdobj._scf.mo_occ
     orbo = mo_coeff[:,mo_occ==2]
     orbv = mo_coeff[:,mo_occ==0]
+
+    if cvs_space is not None:
+        mo_core = mo_occ[cvs_space]
+        orbo = mo_coeff[:, cvs_space]
 
     nstates = len(xy)
     pol_shape = ints.shape[:-2]
@@ -550,26 +658,27 @@ def _contract_multipole(tdobj, ints, hermi=True, xy=None):
     pol = pol.reshape((nstates,)+pol_shape)
     return pol
 
-def oscillator_strength(tdobj, e=None, xy=None, gauge='length', order=0):
+# TODO: test all with CVS
+def oscillator_strength(tdobj, e=None, xy=None, gauge='length', order=0, cvs_space=None):
     if e is None: e = tdobj.e
 
     if gauge == 'length':
-        trans_dip = transition_dipole(tdobj, xy)
+        trans_dip = transition_dipole(tdobj, xy, cvs_space)
         f = 2./3. * numpy.einsum('s,sx,sx->s', e, trans_dip, trans_dip)
         return f
 
     else:  # velocity gauge
         # Ref. JCP, 143, 234103
-        trans_dip = transition_velocity_dipole(tdobj, xy)
+        trans_dip = transition_velocity_dipole(tdobj, xy, cvs_space)
         f = 2./3. * numpy.einsum('s,sx,sx->s', 1./e, trans_dip, trans_dip)
 
         if order > 0:
-            m_dip = .5 * transition_magnetic_dipole(tdobj, xy)
+            m_dip = .5 * transition_magnetic_dipole(tdobj, xy, cvs_space)
             f_m = numpy.einsum('s,sx,sx->s', e, m_dip, m_dip)
             f_m = nist.ALPHA**2/6 * f_m.real
             f += f_m
 
-            quad = .5 * transition_velocity_quadrupole(tdobj, xy)
+            quad = .5 * transition_velocity_quadrupole(tdobj, xy, cvs_space)
             f_quad = numpy.einsum('s,sxy,sxy->s', e, quad, quad)
             f_quad-= 1./3 * numpy.einsum('s,sxx,sxx->s', e, quad, quad)
             f_quad = nist.ALPHA**2/20 * f_quad.real
@@ -579,13 +688,13 @@ def oscillator_strength(tdobj, e=None, xy=None, gauge='length', order=0):
             logger.debug(tdobj, '    %s', f_m+f_quad)
 
         if order > 1:
-            m_quad = -1./6 * 1j*transition_magnetic_quadrupole(tdobj, xy)
+            m_quad = -1./6 * 1j*transition_magnetic_quadrupole(tdobj, xy, cvs_space)
             f_m = numpy.einsum('s,sy,szx,xyz->s', e, trans_dip*1j, m_quad,
                                lib.LeviCivita)
             f_m = nist.ALPHA**3/9 * f_m.real
             f += f_m
 
-            o_pol = -1./6 * 1j*transition_velocity_octupole(tdobj, xy)
+            o_pol = -1./6 * 1j*transition_velocity_octupole(tdobj, xy, cvs_space)
             f_o = numpy.einsum('s,sy,sxxy->s', e, trans_dip*1j, o_pol)
             f_o = -2*nist.ALPHA**2/45 * f_o.real
             f += f_o
@@ -795,11 +904,14 @@ class TDA(TDBase):
             excited state.  (X,Y) are normalized to 1/2 in RHF/RKS methods and
             normalized to 1 for UHF/UKS methods. In the TDA calculation, Y = 0.
     '''
-    def gen_vind(self, mf=None):
+    def gen_vind(self, mf=None, cvs_space=None):
         '''Generate function to compute Ax'''
         if mf is None:
             mf = self._scf
-        return gen_tda_hop(mf, singlet=self.singlet, wfnsym=self.wfnsym)
+        if cvs_space is None:
+            return gen_tda_hop(mf, singlet=self.singlet, wfnsym=self.wfnsym)
+        else:
+            return gen_tda_hop_cvs(mf, singlet=self.singlet, wfnsym=self.wfnsym, cvs_space=cvs_space)
 
     def init_guess(self, mf, nstates=None, wfnsym=None):
         if nstates is None: nstates = self.nstates
@@ -831,7 +943,43 @@ class TDA(TDBase):
             x0[i, j] = 1  # Koopmans' excitations
         return x0
 
-    def kernel(self, x0=None, nstates=None):
+    # TODO: unify init_guess and init_guess_cvs
+    def init_guess_cvs(self, mf, nstates=None, wfnsym=None, cvs_space=None):
+        if nstates is None: nstates = self.nstates
+        if wfnsym is None: wfnsym = self.wfnsym
+
+        mo_energy = mf.mo_energy
+        mo_occ = mf.mo_occ
+        occidx = numpy.where(mo_occ==2)[0]
+        if cvs_space is None:
+            coreidx = occidx
+        else:
+            coreidx = occidx[cvs_space]
+        viridx = numpy.where(mo_occ==0)[0]
+        e_ia = mo_energy[viridx] - mo_energy[coreidx,None]
+
+        if wfnsym is not None and mf.mol.symmetry:
+            if isinstance(wfnsym, str):
+                wfnsym = symm.irrep_name2id(mf.mol.groupname, wfnsym)
+            wfnsym = wfnsym % 10  # convert to D2h subgroup
+            orbsym = hf_symm.get_orbsym(mf.mol, mf.mo_coeff)
+            orbsym_in_d2h = numpy.asarray(orbsym) % 10  # convert to D2h irreps
+            e_ia[(orbsym_in_d2h[coreidx,None] ^ orbsym_in_d2h[viridx]) != wfnsym] = 1e99
+
+        nov = e_ia.size
+        nstates = min(nstates, nov)
+        e_ia = e_ia.ravel()
+        e_threshold = numpy.sort(e_ia)[nstates-1]
+        e_threshold += self.deg_eia_thresh
+
+        idx = numpy.where(e_ia <= e_threshold)[0]
+        x0 = numpy.zeros((idx.size, nov))
+        for i, j in enumerate(idx):
+            x0[i, j] = 1  # Koopmans' excitations
+        return x0
+
+
+    def kernel(self, x0=None, nstates=None, cvs_space=None):
         '''TDA diagonalization solver
         '''
         cpu0 = (logger.process_clock(), logger.perf_counter())
@@ -844,7 +992,7 @@ class TDA(TDBase):
 
         log = logger.Logger(self.stdout, self.verbose)
 
-        vind, hdiag = self.gen_vind(self._scf)
+        vind, hdiag = self.gen_vind(self._scf, cvs_space=cvs_space)
         precond = self.get_precond(hdiag)
 
         def pickeig(w, v, nroots, envs):
@@ -852,7 +1000,10 @@ class TDA(TDBase):
             return w[idx], v[:,idx], idx
 
         if x0 is None:
-            x0 = self.init_guess(self._scf, self.nstates)
+            if cvs_space is None:
+                x0 = self.init_guess(self._scf, self.nstates)
+            else:
+                x0 = self.init_guess_cvs(self._scf, self.nstates, cvs_space=cvs_space)
 
         self.converged, self.e, x1 = \
                 lib.davidson1(vind, x0, precond,
@@ -865,6 +1016,9 @@ class TDA(TDBase):
         nocc = (self._scf.mo_occ>0).sum()
         nmo = self._scf.mo_occ.size
         nvir = nmo - nocc
+        if cvs_space is not None:
+            nocc = len(cvs_space)
+            self._cvs_space = cvs_space
 # 1/sqrt(2) because self.x is for alpha excitation amplitude and 2(X^+*X) = 1
         self.xy = [(xi.reshape(nocc,nvir)*numpy.sqrt(.5),0) for xi in x1]
 
@@ -956,6 +1110,88 @@ def gen_tdhf_operation(mf, fock_ao=None, singlet=True, wfnsym=None):
 
     return vind, hdiag
 
+# TODO: unify gen_tdhf_operation and gen_tdhf_operation_cvs?
+def gen_tdhf_operation_cvs(mf, fock_ao=None, singlet=True, wfnsym=None, cvs_space=None):
+    '''Generate function to compute
+
+    [ A  B][X]
+    [-B -A][Y]
+    '''
+    mol = mf.mol
+    mo_coeff = mf.mo_coeff
+    # assert (mo_coeff.dtype == numpy.double)
+    mo_energy = mf.mo_energy
+    mo_occ = mf.mo_occ
+    nao, nmo = mo_coeff.shape
+    occidx = numpy.where(mo_occ==2)[0]
+    if cvs_space is None:
+        coreidx = occidx
+    else:
+        coreidx = occidx[cvs_space]
+    viridx = numpy.where(mo_occ==0)[0]
+    nocc = len(occidx)
+    ncore = len(coreidx)
+    nvir = len(viridx)
+    orbv = mo_coeff[:,viridx]
+    orbo = mo_coeff[:,occidx]
+    orbc = mo_coeff[:,coreidx]
+
+    if wfnsym is not None and mol.symmetry:
+        if isinstance(wfnsym, str):
+            wfnsym = symm.irrep_name2id(mol.groupname, wfnsym)
+        wfnsym = wfnsym % 10  # convert to D2h subgroup
+        orbsym = hf_symm.get_orbsym(mol, mo_coeff)
+        orbsym_in_d2h = numpy.asarray(orbsym) % 10  # convert to D2h irreps
+        sym_forbid = (orbsym_in_d2h[coreidx,None] ^ orbsym_in_d2h[viridx]) != wfnsym
+
+    #dm0 = mf.make_rdm1(mo_coeff, mo_occ)
+    #fock_ao = mf.get_hcore() + mf.get_veff(mol, dm0)
+    #fock = reduce(numpy.dot, (mo_coeff.T, fock_ao, mo_coeff))
+    #foo = fock[occidx[:,None],occidx]
+    #fvv = fock[viridx[:,None],viridx]
+    fcc = numpy.diag(mo_energy[coreidx])
+    fvv = numpy.diag(mo_energy[viridx])
+
+    hdiag = fvv.diagonal() - fcc.diagonal()[:,None]
+    if wfnsym is not None and mol.symmetry:
+        hdiag[sym_forbid] = 0
+    hdiag = numpy.hstack((hdiag.ravel(), -hdiag.ravel()))
+
+    mo_coeff = numpy.asarray(numpy.hstack((orbc,orbv)), order='F')
+    vresp = mf.gen_response(singlet=singlet, hermi=0)
+
+    def vind(xys):
+        xys = numpy.asarray(xys).reshape(-1,2,ncore,nvir)
+        if wfnsym is not None and mol.symmetry:
+            # shape(nz,2,nocc,nvir): 2 ~ X,Y
+            xys = numpy.copy(xys)
+            xys[:,:,sym_forbid] = 0
+
+        xs, ys = xys.transpose(1,0,2,3)
+        # dms = AX + BY
+        # *2 for double occupancy
+        dms  = lib.einsum('xov,qv,po->xpq', xs*2, orbv.conj(), orbc)
+        dms += lib.einsum('xov,pv,qo->xpq', ys*2, orbv, orbc.conj())
+
+        v1ao = vresp(dms)
+        v1cv = lib.einsum('xpq,po,qv->xov', v1ao, orbc.conj(), orbv)
+        v1vc = lib.einsum('xpq,qo,pv->xov', v1ao, orbc, orbv.conj())
+        v1cv += lib.einsum('xqs,sp->xqp', xs, fvv)  # AX
+        v1cv -= lib.einsum('xpr,sp->xsr', xs, fcc)  # AX
+        v1vc += lib.einsum('xqs,sp->xqp', ys, fvv)  # AY
+        v1vc -= lib.einsum('xpr,sp->xsr', ys, fcc)  # AY
+
+        if wfnsym is not None and mol.symmetry:
+            v1cv[:,sym_forbid] = 0
+            v1vc[:,sym_forbid] = 0
+
+        # (AX, -AY)
+        nz = xys.shape[0]
+        hx = numpy.hstack((v1cv.reshape(nz,-1), -v1vc.reshape(nz,-1)))
+        return hx
+
+    return vind, hdiag
+
 
 class TDHF(TDA):
     '''Time-dependent Hartree-Fock
@@ -979,17 +1215,23 @@ class TDHF(TDA):
             normalized to 1 for UHF/UKS methods. In the TDA calculation, Y = 0.
     '''
     @lib.with_doc(gen_tdhf_operation.__doc__)
-    def gen_vind(self, mf=None):
+    def gen_vind(self, mf=None, cvs_space=None):
         if mf is None:
             mf = self._scf
-        return gen_tdhf_operation(mf, singlet=self.singlet, wfnsym=self.wfnsym)
+        if cvs_space is None:
+            return gen_tdhf_operation(mf, singlet=self.singlet, wfnsym=self.wfnsym)
+        else:
+            return gen_tdhf_operation_cvs(mf, singlet=self.singlet, wfnsym=self.wfnsym, cvs_space=cvs_space)
 
-    def init_guess(self, mf, nstates=None, wfnsym=None):
-        x0 = TDA.init_guess(self, mf, nstates, wfnsym)
+    def init_guess(self, mf, nstates=None, wfnsym=None, cvs_space=None):
+        if cvs_space is None:
+            x0 = TDA.init_guess(self, mf, nstates, wfnsym)
+        else:
+            x0 = TDA.init_guess_cvs(self, mf, nstates, wfnsym, cvs_space)
         y0 = numpy.zeros_like(x0)
         return numpy.asarray(numpy.block([[x0, y0], [y0, x0.conj()]]))
 
-    def kernel(self, x0=None, nstates=None):
+    def kernel(self, x0=None, nstates=None, cvs_space=None):
         '''TDHF diagonalization with non-Hermitian eigenvalue solver
         '''
         cpu0 = (logger.process_clock(), logger.perf_counter())
@@ -1002,7 +1244,7 @@ class TDHF(TDA):
 
         log = logger.Logger(self.stdout, self.verbose)
 
-        vind, hdiag = self.gen_vind(self._scf)
+        vind, hdiag = self.gen_vind(self._scf, cvs_space=cvs_space)
         precond = self.get_precond(hdiag)
 
         # handle single kpt PBC SCF
@@ -1023,7 +1265,7 @@ class TDHF(TDA):
             return lib.linalg_helper._eigs_cmplx2real(w, v, realidx, real_system)
 
         if x0 is None:
-            x0 = self.init_guess(self._scf, self.nstates)
+            x0 = self.init_guess(self._scf, self.nstates, cvs_space=cvs_space)
 
         self.converged, w, x1 = \
                 lib.davidson_nosym1(vind, x0, precond,
@@ -1036,6 +1278,9 @@ class TDHF(TDA):
         nocc = (self._scf.mo_occ>0).sum()
         nmo = self._scf.mo_occ.size
         nvir = nmo - nocc
+        if cvs_space is not None:
+            nocc = len(cvs_space) # needed for correct norm
+            self._cvs_space = cvs_space # needed for self.analyze()
         self.e = w
         def norm_xy(z):
             x, y = z.reshape(2,nocc,nvir)
@@ -1052,6 +1297,7 @@ class TDHF(TDA):
         self._finalize()
         return self.e, self.xy
 
+    # TODO: Test gradients with CVS
     def nuc_grad_method(self):
         from pyscf.grad import tdrhf
         return tdrhf.Gradients(self)
