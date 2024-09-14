@@ -1035,13 +1035,13 @@ class TDA(TDBase):
         if x0 is None:
             if cvs_space is None:
                 x0 = self.init_guess(self._scf, self.nstates)
-            	x0, x0sym = self.init_guess(
-                	self._scf, self.nstates, return_symmetry=True)
+                x0, x0sym = self.init_guess(
+                    self._scf, self.nstates, return_symmetry=True)
             else:
                 x0 = self.init_guess_cvs(self._scf, self.nstates,
-				cvs_space=cvs_space)
-		elif mol.symmetry:
-        	x_sym = _get_x_sym_table(self._scf).ravel()
+                cvs_space=cvs_space)
+        elif mol.symmetry:
+            x_sym = _get_x_sym_table(self._scf).ravel()
             x0sym = [_guess_wfnsym_id(self, x_sym, x) for x in x0]
 
         self.converged, self.e, x1 = lr_eigh(
@@ -1256,7 +1256,7 @@ class TDHF(TDBase):
         else:
             return gen_tdhf_operation_cvs(mf, singlet=self.singlet, wfnsym=self.wfnsym, cvs_space=cvs_space)
 
-	# TODO: update init_guess with init_guess below! 
+    # TODO: update init_guess with init_guess below! 
     def init_guess(self, mf, nstates=None, wfnsym=None, cvs_space=None):
         if cvs_space is None:
             x0 = TDA.init_guess(self, mf, nstates, wfnsym)

@@ -132,7 +132,7 @@ class CasidaTDDFT(TDDFT, TDA):
             return w[idx], v[:,idx], idx
 
         x0sym = None
-		# TODO: update init guess!
+        # TODO: update init guess!
         if x0 is None:
             if cvs_space is None:
                 x0 = self.init_guess(self._scf, self.nstates)
