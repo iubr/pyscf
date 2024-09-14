@@ -25,8 +25,7 @@ import numpy
 from pyscf import lib
 from pyscf import symm
 from pyscf.tdscf import rhf
-from pyscf.scf import hf_symm
-from pyscf.data import nist
+from pyscf.tdscf._lr_eig import eigh as lr_eigh
 from pyscf.dft.rks import KohnShamDFT
 from pyscf import __config__
 
@@ -46,6 +45,7 @@ RPA = TDRKS = TDDFT
 class CasidaTDDFT(TDDFT, TDA):
     '''Solve the Casida TDDFT formula (A-B)(A+B)(X+Y) = (X+Y)w^2
     '''
+
     init_guess = TDA.init_guess
     # TODO: should there be an if-statement here to see if CVS is enabled?
     init_guess_cvs = TDA.init_guess_cvs
@@ -78,9 +78,7 @@ class CasidaTDDFT(TDDFT, TDA):
             if isinstance(wfnsym, str):
                 wfnsym = symm.irrep_name2id(mol.groupname, wfnsym)
             wfnsym = wfnsym % 10  # convert to D2h subgroup
-            orbsym = hf_symm.get_orbsym(mol, mo_coeff)
-            orbsym_in_d2h = numpy.asarray(orbsym) % 10  # convert to D2h irreps
-            sym_forbid = (orbsym_in_d2h[occidx,None] ^ orbsym_in_d2h[viridx]) != wfnsym
+            sym_forbid = rhf._get_x_sym_table(mf) != wfnsym
 
         e_ia = (mo_energy[viridx].reshape(-1,1) - mo_energy[occidx]).T
         if wfnsym is not None and mol.symmetry:
@@ -112,6 +110,7 @@ class CasidaTDDFT(TDDFT, TDA):
         '''TDDFT diagonalization solver
         '''
         cpu0 = (lib.logger.process_clock(), lib.logger.perf_counter())
+        mol = self.mol
         mf = self._scf
         if mf._numint.libxc.is_hybrid_xc(mf.xc):
             raise RuntimeError('%s cannot be used with hybrid functional'
@@ -132,19 +131,25 @@ class CasidaTDDFT(TDDFT, TDA):
             idx = numpy.where(w > self.positive_eig_threshold)[0]
             return w[idx], v[:,idx], idx
 
+        x0sym = None
+		# TODO: update init guess!
         if x0 is None:
             if cvs_space is None:
                 x0 = self.init_guess(self._scf, self.nstates)
             else:
                 x0 = self.init_guess_cvs(self._scf, self.nstates, cvs_space=cvs_space)
+#=======
+#            x0, x0sym = self.init_guess(
+#                self._scf, self.nstates, return_symmetry=True)
+#        elif mol.symmetry:
+#            x_sym = rhf._get_x_sym_table(mf).ravel()
+#            x0sym = [rhf._guess_wfnsym_id(self, x_sym, x) for x in x0]
+#>>>>>>> upstream/master
 
-        self.converged, w2, x1 = \
-                lib.davidson1(vind, x0, precond,
-                              tol=self.conv_tol,
-                              nroots=nstates, lindep=self.lindep,
-                              max_cycle=self.max_cycle,
-                              max_space=self.max_space, pick=pickeig,
-                              verbose=log)
+        self.converged, w2, x1 = lr_eigh(
+            vind, x0, precond, tol_residual=self.conv_tol, lindep=self.lindep,
+            nroots=nstates, x0sym=x0sym, pick=pickeig, max_cycle=self.max_cycle,
+            max_memory=self.max_memory, verbose=log)
 
         mo_energy = self._scf.mo_energy
         mo_occ = self._scf.mo_occ

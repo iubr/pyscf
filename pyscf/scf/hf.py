@@ -33,6 +33,7 @@ from pyscf.lib import logger
 from pyscf.scf import diis
 from pyscf.scf import _vhf
 from pyscf.scf import chkfile
+from pyscf.scf import dispersion
 from pyscf.data import nist
 from pyscf import __config__
 
@@ -166,6 +167,7 @@ Keyword argument "init_dm" is replaced by "dm0"''')
 
     fock_last = None
     cput1 = logger.timer(mf, 'initialize scf', *cput0)
+    mf.cycles = 0
     for cycle in range(mf.max_cycle):
         dm_last = dm
         last_hf_e = e_tot
@@ -205,6 +207,7 @@ Keyword argument "init_dm" is replaced by "dm0"''')
         if scf_conv:
             break
 
+    mf.cycles = cycle + 1
     if scf_conv and conv_check:
         # An extra diagonalization, to remove level shift
         #fock = mf.get_fock(h1e, s1e, vhf, dm)  # = h1e + vhf
@@ -1169,7 +1172,7 @@ def get_grad(mo_coeff, mo_occ, fock_ao):
 
 
 def analyze(mf, verbose=logger.DEBUG, with_meta_lowdin=WITH_META_LOWDIN,
-            **kwargs):
+            origin=None, **kwargs):
     '''Analyze the given SCF object:  print orbital energies, occupancies;
     print orbital coefficients; Mulliken population analysis; Diople moment.
     '''
@@ -1201,10 +1204,10 @@ def analyze(mf, verbose=logger.DEBUG, with_meta_lowdin=WITH_META_LOWDIN,
     dm = mf.make_rdm1(mo_coeff, mo_occ)
     if with_meta_lowdin:
         return (mf.mulliken_meta(mf.mol, dm, s=ovlp_ao, verbose=log),
-                mf.dip_moment(mf.mol, dm, verbose=log))
+                mf.dip_moment(mf.mol, dm, origin=origin, verbose=log))
     else:
         return (mf.mulliken_pop(mf.mol, dm, s=ovlp_ao, verbose=log),
-                mf.dip_moment(mf.mol, dm, verbose=log))
+                mf.dip_moment(mf.mol, dm, origin=origin, verbose=log))
 
 def dump_scf_summary(mf, verbose=logger.DEBUG):
     if not mf.scf_summary:
@@ -1349,7 +1352,7 @@ def canonicalize(mf, mo_coeff, mo_occ, fock=None):
             mo_e[idx] = e
     return mo_e, mo
 
-def dip_moment(mol, dm, unit='Debye', verbose=logger.NOTE, **kwargs):
+def dip_moment(mol, dm, unit='Debye', origin=None, verbose=logger.NOTE, **kwargs):
     r''' Dipole moment calculation
 
     .. math::
@@ -1364,6 +1367,8 @@ def dip_moment(mol, dm, unit='Debye', verbose=logger.NOTE, **kwargs):
     Args:
          mol: an instance of :class:`Mole`
          dm : a 2D ndarrays density matrices
+         origin : optional; length 3 list, tuple, or 1D array
+            Location of the origin. By default, the point (0, 0, 0) is used.
 
     Return:
         A list: the dipole moment on x, y and z component
@@ -1380,13 +1385,23 @@ def dip_moment(mol, dm, unit='Debye', verbose=logger.NOTE, **kwargs):
         # UHF density matrices
         dm = dm[0] + dm[1]
 
-    with mol.with_common_orig((0,0,0)):
-        ao_dip = mol.intor_symmetric('int1e_r', comp=3)
-    el_dip = numpy.einsum('xij,ji->x', ao_dip, dm).real
-
     charges = mol.atom_charges()
     coords  = mol.atom_coords()
-    nucl_dip = numpy.einsum('i,ix->x', charges, coords)
+
+    if origin is None:
+        origin = numpy.zeros(3)
+    else:
+        origin = numpy.asarray(origin, dtype=numpy.float64)
+    assert origin.shape == (3,)
+
+    if mol.charge != 0:
+        log.warn(f"System has nonzero charge {mol.charge}; the dipole moment is origin-dependent.\n"
+                 f"Location of origin: {origin}")
+
+    with mol.with_common_orig(origin):
+        ao_dip = mol.intor_symmetric('int1e_r', comp=3)
+    el_dip = numpy.einsum('xij,ji->x', ao_dip, dm).real
+    nucl_dip = numpy.einsum('i,ix->x', charges, coords - origin[None, :])
     mol_dip = nucl_dip - el_dip
 
     if unit.upper() == 'DEBYE':
@@ -1396,6 +1411,71 @@ def dip_moment(mol, dm, unit='Debye', verbose=logger.NOTE, **kwargs):
         log.note('Dipole moment(X, Y, Z, A.U.): %8.5f, %8.5f, %8.5f', *mol_dip)
     return mol_dip
 
+def quad_moment(mol, dm, unit='DebyeAngstrom', origin=None,
+                verbose=logger.NOTE, **kwargs):
+    r''' Calculates traceless quadrupole moment tensor.
+
+    The traceless quadrupole tensor is given by
+
+    .. math::
+
+        Q_{ij} &= - \frac{1}{2} \sum_{\mu \nu} P_{\mu \nu}
+                \left[ 3 (\nu | r_i r_j | \mu) - \delta_{ij} (\nu | r^2 | \mu) \right] \\
+               &+ \frac{1}{2} \sum_A Q_A
+               \left( R_{iA} R_{jA} - \delta_{ij} \|\mathbf{R}_A\|^2  \right).
+
+    If the molecule has a dipole, the quadrupole moment depends on the location
+    of the origin. By default, the origin is taken to be (0, 0, 0), but it can
+    be set manually via the keyword argument `origin`.
+
+    Args:
+         mol: an instance of :class:`Mole`
+         dm : a 2D ndarrays density matrices
+         origin : optional; length 3 list, tuple, or 1D array
+            Location of the origin. By default, it is (0, 0, 0).
+
+    Return:
+        Traceless quadrupole tensor, 2D ndarray.
+    '''
+
+    log = logger.new_logger(mol, verbose)
+
+    if 'unit_symbol' in kwargs:  # pragma: no cover
+        log.warn('Kwarg "unit_symbol" was deprecated. It was replaced by kwarg '
+                 'unit since PySCF-1.5.')
+        unit = kwargs['unit_symbol']
+
+    if not (isinstance(dm, numpy.ndarray) and dm.ndim == 2):
+        # UHF density matrices
+        dm = dm[0] + dm[1]
+
+    charges = mol.atom_charges()
+    coords  = mol.atom_coords()
+
+    if origin is None:
+        origin = numpy.zeros(3)
+    else:
+        origin = numpy.asarray(origin, dtype=numpy.float64)
+    assert origin.shape == (3,)
+
+    with mol.with_common_orig(origin):
+        quad_ints = mol.intor_symmetric("int1e_rr", comp=9).reshape((3, 3, -1))
+    r_nuc = coords - origin[None, :]
+    elec_q = (quad_ints @ dm.ravel()).real
+    nuc_q = numpy.einsum("g,gx,gy->xy", charges, r_nuc, r_nuc)
+    tot_q = (nuc_q - elec_q) / 2
+    tot_q_traceless = 3 * tot_q - numpy.eye(3) * numpy.trace(tot_q)
+
+    if unit.upper() in ('DEBYEANGSTROM', 'DEBYEANG', 'DEBYEA'):
+        tot_q_traceless *= nist.AU2DEBYE * nist.BOHR
+        log.note('Traceless quadrupole moment (Debye*A):')
+    else:
+        log.note('Traceless quadrupole moment (AU):')
+
+    with numpy.printoptions(precision=5, floatmode='fixed'):
+        log.note(str())
+
+    return tot_q_traceless
 
 def uniq_var_indices(mo_occ):
     '''
@@ -1560,7 +1640,7 @@ class SCF(lib.StreamObject):
     Saved results:
 
         converged : bool
-            SCF converged or not
+            Whether the SCF iteration converged
         e_tot : float
             Total HF energy (electronic energy plus nuclear repulsion)
         mo_energy :
@@ -1569,6 +1649,8 @@ class SCF(lib.StreamObject):
             Orbital occupancy
         mo_coeff
             Orbital coefficients
+        cycles : int
+            The number of iteration cycles performed
 
     Examples:
 
@@ -1612,7 +1694,8 @@ class SCF(lib.StreamObject):
         'diis_file', 'diis_space_rollback', 'damp', 'level_shift',
         'direct_scf', 'direct_scf_tol', 'conv_check', 'callback',
         'mol', 'chkfile', 'mo_energy', 'mo_coeff', 'mo_occ',
-        'e_tot', 'converged', 'scf_summary', 'opt', 'disp', 'disp_with_3body',
+        'e_tot', 'converged', 'cycles', 'scf_summary', 'opt',
+        'disp', 'disp_with_3body',
     }
 
     def __init__(self, mol):
@@ -1641,6 +1724,7 @@ class SCF(lib.StreamObject):
         self.mo_occ = None
         self.e_tot = 0
         self.converged = False
+        self.cycles = 0
         self.scf_summary = {}
 
         self._opt = {None: None}
@@ -1812,7 +1896,7 @@ employing the updated GWH rule from doi:10.1021/ja00480a005.''')
 This is the Gaussian fit version as described in doi:10.1063/5.0004046.''')
         if isinstance(sap_basis, str):
             atoms = [coord[0] for coord in mol._atom]
-            sapbas = dict()
+            sapbas = {}
             for atom in set(atoms):
                 single_element_bs = load(sap_basis, atom)
                 if isinstance(single_element_bs, dict):
@@ -1821,7 +1905,7 @@ This is the Gaussian fit version as described in doi:10.1063/5.0004046.''')
                     sapbas[atom] = numpy.asarray(single_element_bs[0][1:], dtype=float)
             logger.note(self, f'Found SAP basis {sap_basis.split("/")[-1]}')
         elif isinstance(sap_basis, dict):
-            sapbas = dict()
+            sapbas = {}
             for key in sap_basis:
                 sapbas[key] = numpy.asarray(sap_basis[key][0][1:], dtype=float)
         else:
@@ -1874,6 +1958,9 @@ This is the Gaussian fit version as described in doi:10.1063/5.0004046.''')
     make_rdm2 = lib.module_method(make_rdm2, absences=['mo_coeff', 'mo_occ'])
     energy_elec = energy_elec
     energy_tot = energy_tot
+
+    do_disp = dispersion.check_disp
+    get_dispersion = dispersion.get_dispersion
 
     def energy_nuc(self):
         return self.mol.enuc
@@ -2026,11 +2113,19 @@ This is the Gaussian fit version as described in doi:10.1063/5.0004046.''')
     canonicalize = canonicalize
 
     @lib.with_doc(dip_moment.__doc__)
-    def dip_moment(self, mol=None, dm=None, unit='Debye', verbose=logger.NOTE,
+    def dip_moment(self, mol=None, dm=None, unit='Debye', origin=None, verbose=logger.NOTE,
                    **kwargs):
         if mol is None: mol = self.mol
         if dm is None: dm =self.make_rdm1()
-        return dip_moment(mol, dm, unit, verbose=verbose, **kwargs)
+        return dip_moment(mol, dm, unit, origin=origin, verbose=verbose, **kwargs)
+
+    @lib.with_doc(quad_moment.__doc__)
+    def quad_moment(self, mol=None, dm=None, unit='DebyeAngstrom', origin=None,
+                verbose=logger.NOTE, **kwargs):
+        if mol is None: mol = self.mol
+        if dm is None: dm =self.make_rdm1()
+        return quad_moment(mol, dm, unit=unit, origin=origin,
+                verbose=verbose, **kwargs)
 
     def _is_mem_enough(self):
         nbf = self.mol.nao_nr()
