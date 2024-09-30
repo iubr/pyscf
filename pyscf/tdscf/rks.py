@@ -47,8 +47,6 @@ class CasidaTDDFT(TDDFT, TDA):
     '''
 
     init_guess = TDA.init_guess
-    # TODO: should there be an if-statement here to see if CVS is enabled?
-    init_guess_cvs = TDA.init_guess_cvs
 
     def gen_vind(self, mf=None, cvs_space=None):
         if mf is None:
@@ -132,19 +130,12 @@ class CasidaTDDFT(TDDFT, TDA):
             return w[idx], v[:,idx], idx
 
         x0sym = None
-        # TODO: update init guess!
         if x0 is None:
-            if cvs_space is None:
-                x0 = self.init_guess(self._scf, self.nstates)
-            else:
-                x0 = self.init_guess_cvs(self._scf, self.nstates, cvs_space=cvs_space)
-#=======
-#            x0, x0sym = self.init_guess(
-#                self._scf, self.nstates, return_symmetry=True)
-#        elif mol.symmetry:
-#            x_sym = rhf._get_x_sym_table(mf).ravel()
-#            x0sym = [rhf._guess_wfnsym_id(self, x_sym, x) for x in x0]
-#>>>>>>> upstream/master
+            x0, x0sym = self.init_guess(
+                self._scf, self.nstates, return_symmetry=True, cvs_space=cvs_space)
+        elif mol.symmetry:
+            x_sym = rhf._get_x_sym_table(mf, cvs_space=cvs_space).ravel()
+            x0sym = [rhf._guess_wfnsym_id(self, x_sym, x) for x in x0]
 
         self.converged, w2, x1 = lr_eigh(
             vind, x0, precond, tol_residual=self.conv_tol, lindep=self.lindep,

@@ -105,6 +105,7 @@ def gen_tda_operation(mf, fock_ao=None, singlet=True, wfnsym=None):
 
     return vind, hdiag
 
+# TODO: Unify gen_tda_operation_cvs with gen_tda_operation
 def gen_tda_operation_cvs(mf, fock_ao=None, singlet=True, wfnsym=None, cvs_space=None):
     '''Generate function to compute A x, but for the core-valence separation approximation.
 
@@ -133,7 +134,6 @@ def gen_tda_operation_cvs(mf, fock_ao=None, singlet=True, wfnsym=None, cvs_space
     orbv = mo_coeff[:,viridx]
     orbc = mo_coeff[:,coreidx]
 
-    # TODO: test for coreidx
     if wfnsym is not None and mol.symmetry:
         if isinstance(wfnsym, str):
             wfnsym = symm.irrep_name2id(mol.groupname, wfnsym)
@@ -181,14 +181,20 @@ def gen_tda_operation_cvs(mf, fock_ao=None, singlet=True, wfnsym=None, cvs_space
 gen_tda_hop = gen_tda_operation
 gen_tda_hop_cvs = gen_tda_operation_cvs
 
-# TODO: test with CVS
-def _get_x_sym_table(mf):
-    '''Irrep (up to D2h symmetry) of each coefficient in X[nocc,nvir]'''
+def _get_x_sym_table(mf, cvs_space=None):
+    '''Irrep (up to D2h symmetry) of each coefficient in X[nocc,nvir]
+       If cvs_space is not None, then the routine returns the irrep of each
+       coefficient in X[cvs_space, nvir], where cvs_space is the list of core
+       orbitals for the CVS approximation.
+    '''
     mol = mf.mol
     mo_occ = mf.mo_occ
     orbsym = hf_symm.get_orbsym(mol, mf.mo_coeff)
     orbsym = orbsym % 10  # convert to D2h irreps
-    return orbsym[mo_occ==2,None] ^ orbsym[mo_occ==0]
+    if cvs_space is None:
+        return orbsym[mo_occ==2,None] ^ orbsym[mo_occ==0]
+    else:
+        return orbsym[cvs_space, None] ^ orbsym[mo_occ==0]
 
 def get_ab(mf, mo_energy=None, mo_coeff=None, mo_occ=None):
     r'''A and B matrices for TDDFT response function.
@@ -311,7 +317,7 @@ def get_ab(mf, mo_energy=None, mo_coeff=None, mo_occ=None):
 
     return a, b
 
-# TODO: test with CVS
+# TODO: modify to account for CVS and test.
 def get_nto(tdobj, state=1, threshold=OUTPUT_THRESHOLD, verbose=None):
     r'''
     Natural transition orbital analysis.
@@ -462,7 +468,10 @@ def analyze(tdobj, verbose=None):
 
     if mol.symmetry:
         orbsym = hf_symm.get_orbsym(mol, mo_coeff)
-        x_sym = symm.direct_prod(orbsym[mo_occ==2], orbsym[mo_occ==0], mol.groupname)
+        if tdobj.xy[0][0].shape[0] != nocc: # CVS calculation
+            x_sym = symm.direct_prod(orbsym[tdobj._cvs_space], orbsym[mo_occ==0], mol.groupname)
+        else:
+            x_sym = symm.direct_prod(orbsym[mo_occ==2], orbsym[mo_occ==0], mol.groupname)
     else:
         x_sym = None
 
@@ -923,9 +932,9 @@ class TDA(TDBase):
         else:
             return gen_tda_hop_cvs(mf, singlet=self.singlet, wfnsym=self.wfnsym, cvs_space=cvs_space)
 
-    def init_guess(self, mf, nstates=None, wfnsym=None, return_symmetry=False):
+    def init_guess(self, mf, nstates=None, wfnsym=None, return_symmetry=False, cvs_space=None):
         '''
-        Generate initial guess for TDA
+        Generate initial guess for TDA in the CVS approximation.
 
         Kwargs:
             nstates : int
@@ -934,20 +943,29 @@ class TDA(TDBase):
                 The irrep label or ID of the wavefunction.
             return_symmetry : bool
                 Whether to return symmetry labels for initial guess vectors.
+            cvs_space: int list
+                The indices of the core orbitals (for the core-valence sparation approximation to
+                calculate X-ray absorption spectra).
         '''
         if nstates is None: nstates = self.nstates
         if wfnsym is None: wfnsym = self.wfnsym
 
         mo_energy = mf.mo_energy
         mo_occ = mf.mo_occ
+        coreidx = cvs_space
         occidx = numpy.where(mo_occ==2)[0]
         viridx = numpy.where(mo_occ==0)[0]
-        e_ia = (mo_energy[viridx] - mo_energy[occidx,None]).ravel()
+
+        if cvs_space is not None:
+            e_ia = (mo_energy[viridx] - mo_energy[coreidx,None]).ravel()
+        else:
+            e_ia = (mo_energy[viridx] - mo_energy[occidx,None]).ravel()
+
         nov = e_ia.size
         nstates = min(nstates, nov)
 
         if (wfnsym is not None or return_symmetry) and mf.mol.symmetry:
-            x_sym = _get_x_sym_table(mf).ravel()
+            x_sym = _get_x_sym_table(mf, cvs_space=cvs_space).ravel()
             if wfnsym is not None:
                 if isinstance(wfnsym, str):
                     wfnsym = symm.irrep_name2id(mf.mol.groupname, wfnsym)
@@ -974,42 +992,6 @@ class TDA(TDBase):
         else:
             return x0
 
-    # TODO: unify init_guess and init_guess_cvs and add return symmetry!
-    def init_guess_cvs(self, mf, nstates=None, wfnsym=None, cvs_space=None):
-        if nstates is None: nstates = self.nstates
-        if wfnsym is None: wfnsym = self.wfnsym
-
-        mo_energy = mf.mo_energy
-        mo_occ = mf.mo_occ
-        occidx = numpy.where(mo_occ==2)[0]
-        if cvs_space is None:
-            coreidx = occidx
-        else:
-            coreidx = occidx[cvs_space]
-        viridx = numpy.where(mo_occ==0)[0]
-        e_ia = mo_energy[viridx] - mo_energy[coreidx,None]
-
-        if wfnsym is not None and mf.mol.symmetry:
-            if isinstance(wfnsym, str):
-                wfnsym = symm.irrep_name2id(mf.mol.groupname, wfnsym)
-            wfnsym = wfnsym % 10  # convert to D2h subgroup
-            orbsym = hf_symm.get_orbsym(mf.mol, mf.mo_coeff)
-            orbsym_in_d2h = numpy.asarray(orbsym) % 10  # convert to D2h irreps
-            e_ia[(orbsym_in_d2h[coreidx,None] ^ orbsym_in_d2h[viridx]) != wfnsym] = 1e99
-
-        nov = e_ia.size
-        nstates = min(nstates, nov)
-        e_ia = e_ia.ravel()
-        e_threshold = numpy.sort(e_ia)[nstates-1]
-        e_threshold += self.deg_eia_thresh
-
-        idx = numpy.where(e_ia <= e_threshold)[0]
-        x0 = numpy.zeros((idx.size, nov))
-        for i, j in enumerate(idx):
-            x0[i, j] = 1  # Koopmans' excitations
-        return x0
-
-
     def kernel(self, x0=None, nstates=None, cvs_space=None):
         '''TDA diagonalization solver
         '''
@@ -1033,15 +1015,10 @@ class TDA(TDBase):
 
         x0sym = None
         if x0 is None:
-            if cvs_space is None:
-                x0 = self.init_guess(self._scf, self.nstates)
-                x0, x0sym = self.init_guess(
-                    self._scf, self.nstates, return_symmetry=True)
-            else:
-                x0 = self.init_guess_cvs(self._scf, self.nstates,
-                cvs_space=cvs_space)
+            x0, x0sym = self.init_guess(
+                self._scf, self.nstates, return_symmetry=True, cvs_space=cvs_space)
         elif mol.symmetry:
-            x_sym = _get_x_sym_table(self._scf).ravel()
+            x_sym = _get_x_sym_table(self._scf, cvs_space=cvs_space).ravel()
             x0sym = [_guess_wfnsym_id(self, x_sym, x) for x in x0]
 
         self.converged, self.e, x1 = lr_eigh(
@@ -1142,7 +1119,7 @@ def gen_tdhf_operation(mf, fock_ao=None, singlet=True, wfnsym=None):
 
     return vind, hdiag
 
-# TODO: unify gen_tdhf_operation and gen_tdhf_operation_cvs?
+# TODO: unify gen_tdhf_operation and gen_tdhf_operation_cvs
 def gen_tdhf_operation_cvs(mf, fock_ao=None, singlet=True, wfnsym=None, cvs_space=None):
     '''Generate function to compute
 
@@ -1256,26 +1233,15 @@ class TDHF(TDBase):
         else:
             return gen_tdhf_operation_cvs(mf, singlet=self.singlet, wfnsym=self.wfnsym, cvs_space=cvs_space)
 
-    # TODO: update init_guess with init_guess below! 
-    def init_guess(self, mf, nstates=None, wfnsym=None, cvs_space=None):
-        if cvs_space is None:
-            x0 = TDA.init_guess(self, mf, nstates, wfnsym)
+    def init_guess(self, mf, nstates=None, wfnsym=None, return_symmetry=False, cvs_space=None):
+        if return_symmetry:
+            x0, x0sym = TDA.init_guess(self, mf, nstates, wfnsym, return_symmetry, cvs_space=cvs_space)
+            y0 = numpy.zeros_like(x0)
+            return numpy.hstack([x0, y0]), x0sym
         else:
-            x0 = TDA.init_guess_cvs(self, mf, nstates, wfnsym, cvs_space)
-        y0 = numpy.zeros_like(x0)
-        return numpy.asarray(numpy.block([[x0, y0], [y0, x0.conj()]]))
-
-#=======
-#    def init_guess(self, mf, nstates=None, wfnsym=None, return_symmetry=False):
-#        if return_symmetry:
-#            x0, x0sym = TDA.init_guess(self, mf, nstates, wfnsym, return_symmetry)
-#            y0 = numpy.zeros_like(x0)
-#            return numpy.hstack([x0, y0]), x0sym
-#        else:
-#            x0 = TDA.init_guess(self, mf, nstates, wfnsym, return_symmetry)
-#            y0 = numpy.zeros_like(x0)
-#            return numpy.hstack([x0, y0])
-#>>>>>>> upstream/master
+            x0 = TDA.init_guess(self, mf, nstates, wfnsym, return_symmetry, cvs_space=cvs_space)
+            y0 = numpy.zeros_like(x0)
+            return numpy.hstack([x0, y0])
 
     def kernel(self, x0=None, nstates=None, cvs_space=None):
         '''TDHF diagonalization with non-Hermitian eigenvalue solver
@@ -1313,16 +1279,12 @@ class TDHF(TDBase):
 
         x0sym = None
         if x0 is None:
-            x0 = self.init_guess(self._scf, self.nstates, cvs_space=cvs_space)
-# TODO: Update init guess!!!
-#=======
-#            x0, x0sym = self.init_guess(
-#                self._scf, self.nstates, return_symmetry=True)
-#        elif mol.symmetry:
-#            x_sym = y_sym = _get_x_sym_table(self._scf).ravel()
-#            x_sym = numpy.append(x_sym, y_sym)
-#            x0sym = [_guess_wfnsym_id(self, x_sym, x) for x in x0]
-#>>>>>>> upstream/master
+            x0, x0sym = self.init_guess(
+                self._scf, self.nstates, return_symmetry=True, cvs_space=cvs_space)
+        elif mol.symmetry:
+            x_sym = y_sym = _get_x_sym_table(self._scf, cvs_space=cvs_space).ravel()
+            x_sym = numpy.append(x_sym, y_sym)
+            x0sym = [_guess_wfnsym_id(self, x_sym, x) for x in x0]
 
         self.converged, w, x1 = lr_eig(
             vind, x0, precond, tol_residual=self.conv_tol, lindep=self.lindep,
