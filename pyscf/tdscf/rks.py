@@ -47,8 +47,9 @@ class CasidaTDDFT(TDDFT, TDA):
     '''
 
     init_guess = TDA.init_guess
+    get_precond = TDA.get_precond
 
-    def gen_vind(self, mf=None, cvs_space=None):
+    def gen_vind(self, mf=None):
         if mf is None:
             mf = self._scf
         wfnsym = self.wfnsym
@@ -67,8 +68,8 @@ class CasidaTDDFT(TDDFT, TDA):
         orbv = mo_coeff[:,viridx]
         orbo = mo_coeff[:,occidx]
 
-        if cvs_space is not None:
-            occidx = occidx[cvs_space]
+        if self.cvs_space is not None:
+            occidx = occidx[self.cvs_space]
             nocc = len(occidx)
             orbo = mo_coeff[:,occidx]
 
@@ -90,21 +91,21 @@ class CasidaTDDFT(TDDFT, TDA):
         def vind(zs):
             zs = numpy.asarray(zs).reshape(-1,nocc,nvir)
             # *2 for double occupancy
-            dmov = lib.einsum('xov,ov,po,qv->xpq', zs, d_ia*2, orbo, orbv.conj())
+            dms = lib.einsum('xov,pv,qo->xpq', zs * (d_ia*2), orbv, orbo)
             # +cc for A+B and K_{ai,jb} in A == K_{ai,bj} in B
-            dmov = dmov + dmov.conj().transpose(0,2,1)
+            dms = dms + dms.transpose(0,2,1)
 
-            v1ao = vresp(dmov)
-            v1ov = lib.einsum('xpq,po,qv->xov', v1ao, orbo.conj(), orbv)
+            v1ao = vresp(dms)
+            v1mo = lib.einsum('xpq,qo,pv->xov', v1ao, orbo, orbv)
 
-            # numpy.sqrt(e_ia) * (e_ia*d_ia*z + v1ov)
-            v1ov += numpy.einsum('xov,ov->xov', zs, ed_ia)
-            v1ov *= d_ia
-            return v1ov.reshape(v1ov.shape[0],-1)
+            # numpy.sqrt(e_ia) * (e_ia*d_ia*z + v1mo)
+            v1mo += numpy.einsum('xov,ov->xov', zs, ed_ia)
+            v1mo *= d_ia
+            return v1mo.reshape(v1mo.shape[0],-1)
 
         return vind, hdiag
 
-    def kernel(self, x0=None, nstates=None, cvs_space=None):
+    def kernel(self, x0=None, nstates=None):
         '''TDDFT diagonalization solver
         '''
         cpu0 = (lib.logger.process_clock(), lib.logger.perf_counter())
@@ -122,7 +123,7 @@ class CasidaTDDFT(TDDFT, TDA):
 
         log = lib.logger.Logger(self.stdout, self.verbose)
 
-        vind, hdiag = self.gen_vind(self._scf, cvs_space=cvs_space)
+        vind, hdiag = self.gen_vind(self._scf)
         precond = self.get_precond(hdiag)
 
         def pickeig(w, v, nroots, envs):
@@ -132,9 +133,9 @@ class CasidaTDDFT(TDDFT, TDA):
         x0sym = None
         if x0 is None:
             x0, x0sym = self.init_guess(
-                self._scf, self.nstates, return_symmetry=True, cvs_space=cvs_space)
+                self._scf, self.nstates, return_symmetry=True)
         elif mol.symmetry:
-            x_sym = rhf._get_x_sym_table(mf, cvs_space=cvs_space).ravel()
+            x_sym = rhf._get_x_sym_table(mf).ravel()
             x0sym = [rhf._guess_wfnsym_id(self, x_sym, x) for x in x0]
 
         self.converged, w2, x1 = lr_eigh(
@@ -146,9 +147,8 @@ class CasidaTDDFT(TDDFT, TDA):
         mo_occ = self._scf.mo_occ
         occidx = numpy.where(mo_occ==2)[0]
         viridx = numpy.where(mo_occ==0)[0]
-        if cvs_space is not None:
-            occidx = occidx[cvs_space]
-            self._cvs_space = cvs_space
+        if self.cvs_space is not None:
+            occidx = occidx[self.cvs_space]
         e_ia = (mo_energy[viridx,None] - mo_energy[occidx]).T
         e_ia = numpy.sqrt(e_ia)
         def norm_xy(w, z):
@@ -157,7 +157,9 @@ class CasidaTDDFT(TDDFT, TDA):
             x = (zp + zm) * .5
             y = (zp - zm) * .5
             norm = lib.norm(x)**2 - lib.norm(y)**2
-            norm = numpy.sqrt(.5/norm)  # normalize to 0.5 for alpha spin
+            if norm < 0:
+                log.warn('TDDFT amplitudes |X| smaller than |Y|')
+            norm = abs(.5/norm)**.5  # normalize to 0.5 for alpha spin
             return (x*norm, y*norm)
 
         idx = numpy.where(w2 > self.positive_eig_threshold)[0]
@@ -174,7 +176,10 @@ class CasidaTDDFT(TDDFT, TDA):
 
     def nuc_grad_method(self):
         from pyscf.grad import tdrks
-        return tdrks.Gradients(self)
+        if self.cvs_space is None:
+            return tdrks.Gradients(self)
+        else:
+            raise NotImplementedError("Nuclear gradients not implemented for core-excited states.")
 
 TDDFTNoHybrid = CasidaTDDFT
 
