@@ -77,7 +77,7 @@ class CasidaTDDFT(TDDFT, TDA):
             if isinstance(wfnsym, str):
                 wfnsym = symm.irrep_name2id(mol.groupname, wfnsym)
             wfnsym = wfnsym % 10  # convert to D2h subgroup
-            sym_forbid = rhf._get_x_sym_table(mf) != wfnsym
+            sym_forbid = rhf._get_x_sym_table(mf, cvs_space=self.cvs_space) != wfnsym
 
         e_ia = (mo_energy[viridx].reshape(-1,1) - mo_energy[occidx]).T
         if wfnsym is not None and mol.symmetry:
@@ -135,7 +135,7 @@ class CasidaTDDFT(TDDFT, TDA):
             x0, x0sym = self.init_guess(
                 self._scf, self.nstates, return_symmetry=True)
         elif mol.symmetry:
-            x_sym = rhf._get_x_sym_table(mf).ravel()
+            x_sym = rhf._get_x_sym_table(mf, cvs_space=self.cvs_space).ravel()
             x0sym = [rhf._guess_wfnsym_id(self, x_sym, x) for x in x0]
 
         self.converged, w2, x1 = lr_eigh(
