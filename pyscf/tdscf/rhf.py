@@ -178,21 +178,21 @@ def get_ab(mf, mo_energy=None, mo_coeff=None, mo_occ=None, cvs_space=None, user_
         max_memory = max(2000, mf.max_memory*.8-mem_now)
 
         if user_defined_fxc is not None:
-                ao_deriv = 0
-                ip0 = 0
-                for ao, mask, weight, coords \
-                        in ni.block_loop(mol, mf.grids, nao, ao_deriv, max_memory):
-                    rho = make_rho(0, ao, mask, "LDA")
-                    ip1 = ip0 + ao.shape[0]
-                    wfxc = user_defined_fxc[ip0:ip1] * weight
-                    ip0 = ip1
-                    rho_o = lib.einsum('rp,pi->ri', ao, orbo)
-                    rho_v = lib.einsum('rp,pi->ri', ao, orbv)
-                    rho_ov = numpy.einsum('ri,ra->ria', rho_o, rho_v)
-                    w_ov = numpy.einsum('ria,r->ria', rho_ov, wfxc)
-                    iajb = lib.einsum('ria,rjb->iajb', rho_ov, w_ov) * 2
-                    a += iajb
-                    b += iajb
+            ao_deriv = 0
+            ip0 = 0
+            for ao, mask, weight, coords \
+                    in ni.block_loop(mol, mf.grids, nao, ao_deriv, max_memory):
+                rho = make_rho(0, ao, mask, "LDA")
+                ip1 = ip0 + ao.shape[0]
+                wfxc = user_defined_fxc[ip0:ip1] * weight
+                ip0 = ip1
+                rho_o = lib.einsum('rp,pi->ri', ao, orbo)
+                rho_v = lib.einsum('rp,pi->ri', ao, orbv)
+                rho_ov = numpy.einsum('ri,ra->ria', rho_o, rho_v)
+                w_ov = numpy.einsum('ria,r->ria', rho_ov, wfxc)
+                iajb = lib.einsum('ria,rjb->iajb', rho_ov, w_ov) * 2
+                a += iajb
+                b += iajb
         else:
             if xctype == 'LDA':
                 ao_deriv = 0
