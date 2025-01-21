@@ -114,7 +114,7 @@ def _get_x_sym_table(mf, cvs_space=None):
     else:
         return orbsym[cvs_space, None] ^ orbsym[mo_occ==0]
 
-def get_ab(mf, mo_energy=None, mo_coeff=None, mo_occ=None, cvs_space=None):
+def get_ab(mf, mo_energy=None, mo_coeff=None, mo_occ=None, cvs_space=None, user_defined_fxc=None):
     r'''A and B matrices for TDDFT response function.
 
     A[i,a,j,b] = \delta_{ab}\delta_{ij}(E_a - E_i) + (ai||jb)
@@ -177,61 +177,78 @@ def get_ab(mf, mo_energy=None, mo_coeff=None, mo_occ=None, cvs_space=None):
         mem_now = lib.current_memory()[0]
         max_memory = max(2000, mf.max_memory*.8-mem_now)
 
-        if xctype == 'LDA':
-            ao_deriv = 0
-            for ao, mask, weight, coords \
-                    in ni.block_loop(mol, mf.grids, nao, ao_deriv, max_memory):
-                rho = make_rho(0, ao, mask, xctype)
-                fxc = ni.eval_xc_eff(mf.xc, rho, deriv=2, xctype=xctype)[2]
-                wfxc = fxc[0,0] * weight
+        if user_defined_fxc is not None:
+                ao_deriv = 0
+                ip0 = 0
+                for ao, mask, weight, coords \
+                        in ni.block_loop(mol, mf.grids, nao, ao_deriv, max_memory):
+                    rho = make_rho(0, ao, mask, "LDA")
+                    ip1 = ip0 + ao.shape[0]
+                    wfxc = user_defined_fxc[ip0:ip1] * weight
+                    ip0 = ip1
+                    rho_o = lib.einsum('rp,pi->ri', ao, orbo)
+                    rho_v = lib.einsum('rp,pi->ri', ao, orbv)
+                    rho_ov = numpy.einsum('ri,ra->ria', rho_o, rho_v)
+                    w_ov = numpy.einsum('ria,r->ria', rho_ov, wfxc)
+                    iajb = lib.einsum('ria,rjb->iajb', rho_ov, w_ov) * 2
+                    a += iajb
+                    b += iajb
+        else:
+            if xctype == 'LDA':
+                ao_deriv = 0
+                for ao, mask, weight, coords \
+                        in ni.block_loop(mol, mf.grids, nao, ao_deriv, max_memory):
+                    rho = make_rho(0, ao, mask, xctype)
+                    fxc = ni.eval_xc_eff(mf.xc, rho, deriv=2, xctype=xctype)[2]
+                    wfxc = fxc[0,0] * weight
 
-                rho_o = lib.einsum('rp,pi->ri', ao, orbo)
-                rho_v = lib.einsum('rp,pi->ri', ao, orbv)
-                rho_ov = numpy.einsum('ri,ra->ria', rho_o, rho_v)
-                w_ov = numpy.einsum('ria,r->ria', rho_ov, wfxc)
-                iajb = lib.einsum('ria,rjb->iajb', rho_ov, w_ov) * 2
-                a += iajb
-                b += iajb
+                    rho_o = lib.einsum('rp,pi->ri', ao, orbo)
+                    rho_v = lib.einsum('rp,pi->ri', ao, orbv)
+                    rho_ov = numpy.einsum('ri,ra->ria', rho_o, rho_v)
+                    w_ov = numpy.einsum('ria,r->ria', rho_ov, wfxc)
+                    iajb = lib.einsum('ria,rjb->iajb', rho_ov, w_ov) * 2
+                    a += iajb
+                    b += iajb
 
-        elif xctype == 'GGA':
-            ao_deriv = 1
-            for ao, mask, weight, coords \
-                    in ni.block_loop(mol, mf.grids, nao, ao_deriv, max_memory):
-                rho = make_rho(0, ao, mask, xctype)
-                fxc = ni.eval_xc_eff(mf.xc, rho, deriv=2, xctype=xctype)[2]
-                wfxc = fxc * weight
-                rho_o = lib.einsum('xrp,pi->xri', ao, orbo)
-                rho_v = lib.einsum('xrp,pi->xri', ao, orbv)
-                rho_ov = numpy.einsum('xri,ra->xria', rho_o, rho_v[0])
-                rho_ov[1:4] += numpy.einsum('ri,xra->xria', rho_o[0], rho_v[1:4])
-                w_ov = numpy.einsum('xyr,xria->yria', wfxc, rho_ov)
-                iajb = lib.einsum('xria,xrjb->iajb', w_ov, rho_ov) * 2
-                a += iajb
-                b += iajb
+            elif xctype == 'GGA':
+                ao_deriv = 1
+                for ao, mask, weight, coords \
+                        in ni.block_loop(mol, mf.grids, nao, ao_deriv, max_memory):
+                    rho = make_rho(0, ao, mask, xctype)
+                    fxc = ni.eval_xc_eff(mf.xc, rho, deriv=2, xctype=xctype)[2]
+                    wfxc = fxc * weight
+                    rho_o = lib.einsum('xrp,pi->xri', ao, orbo)
+                    rho_v = lib.einsum('xrp,pi->xri', ao, orbv)
+                    rho_ov = numpy.einsum('xri,ra->xria', rho_o, rho_v[0])
+                    rho_ov[1:4] += numpy.einsum('ri,xra->xria', rho_o[0], rho_v[1:4])
+                    w_ov = numpy.einsum('xyr,xria->yria', wfxc, rho_ov)
+                    iajb = lib.einsum('xria,xrjb->iajb', w_ov, rho_ov) * 2
+                    a += iajb
+                    b += iajb
 
-        elif xctype == 'HF':
-            pass
+            elif xctype == 'HF':
+                pass
 
-        elif xctype == 'NLC':
-            raise NotImplementedError('NLC')
+            elif xctype == 'NLC':
+                raise NotImplementedError('NLC')
 
-        elif xctype == 'MGGA':
-            ao_deriv = 1
-            for ao, mask, weight, coords \
-                    in ni.block_loop(mol, mf.grids, nao, ao_deriv, max_memory):
-                rho = make_rho(0, ao, mask, xctype)
-                fxc = ni.eval_xc_eff(mf.xc, rho, deriv=2, xctype=xctype)[2]
-                wfxc = fxc * weight
-                rho_o = lib.einsum('xrp,pi->xri', ao, orbo)
-                rho_v = lib.einsum('xrp,pi->xri', ao, orbv)
-                rho_ov = numpy.einsum('xri,ra->xria', rho_o, rho_v[0])
-                rho_ov[1:4] += numpy.einsum('ri,xra->xria', rho_o[0], rho_v[1:4])
-                tau_ov = numpy.einsum('xri,xra->ria', rho_o[1:4], rho_v[1:4]) * .5
-                rho_ov = numpy.vstack([rho_ov, tau_ov[numpy.newaxis]])
-                w_ov = numpy.einsum('xyr,xria->yria', wfxc, rho_ov)
-                iajb = lib.einsum('xria,xrjb->iajb', w_ov, rho_ov) * 2
-                a += iajb
-                b += iajb
+            elif xctype == 'MGGA':
+                ao_deriv = 1
+                for ao, mask, weight, coords \
+                        in ni.block_loop(mol, mf.grids, nao, ao_deriv, max_memory):
+                    rho = make_rho(0, ao, mask, xctype)
+                    fxc = ni.eval_xc_eff(mf.xc, rho, deriv=2, xctype=xctype)[2]
+                    wfxc = fxc * weight
+                    rho_o = lib.einsum('xrp,pi->xri', ao, orbo)
+                    rho_v = lib.einsum('xrp,pi->xri', ao, orbv)
+                    rho_ov = numpy.einsum('xri,ra->xria', rho_o, rho_v[0])
+                    rho_ov[1:4] += numpy.einsum('ri,xra->xria', rho_o[0], rho_v[1:4])
+                    tau_ov = numpy.einsum('xri,xra->ria', rho_o[1:4], rho_v[1:4]) * .5
+                    rho_ov = numpy.vstack([rho_ov, tau_ov[numpy.newaxis]])
+                    w_ov = numpy.einsum('xyr,xria->yria', wfxc, rho_ov)
+                    iajb = lib.einsum('xria,xrjb->iajb', w_ov, rho_ov) * 2
+                    a += iajb
+                    b += iajb
 
     else:
         add_hf_(a, b)
@@ -685,7 +702,7 @@ class TDBase(lib.StreamObject):
     _keys = {
         'conv_tol', 'nstates', 'singlet', 'lindep', 'level_shift',
         'max_cycle', 'mol', 'chkfile', 'wfnsym', 'converged', 'e', 'xy',
-        'cvs_space',
+        'cvs_space', 'user_defined_fxc'
     }
 
     def __init__(self, mf):
@@ -699,6 +716,11 @@ class TDBase(lib.StreamObject):
         # The cvs space is used in the core-valence separation approximation
         # for X-ray absorption calculations. It is the list of active core orbitals indices.
         self.cvs_space = None
+
+        # User defined fxc, to allow TDDFT calculations for
+        # other types of densities. The user-defined fxc should be
+        # defined on the DFT grid.
+        self.user_defined_fxc = None
 
         self.wfnsym = None
 
@@ -761,7 +783,7 @@ class TDBase(lib.StreamObject):
     @lib.with_doc(get_ab.__doc__)
     def get_ab(self, mf=None):
         if mf is None: mf = self._scf
-        return get_ab(mf, cvs_space=self.cvs_space)
+        return get_ab(mf, cvs_space=self.cvs_space, user_defined_fxc=self.user_defined_fxc)
 
     def get_precond(self, hdiag):
         def precond(x, e, *args):
