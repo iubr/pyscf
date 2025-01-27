@@ -7,7 +7,7 @@ def hartree_in_ev():
     return 27.211386245988
 
 def compute_numerical_fxc(molecule, dm_target, coords, epsilon=5e-7, guide="Slater",
-                          regularization=0.0, method="SLPQ", xctype="LDA"):
+                          regularization=0.0, method="SLSQP", xctype="LDA", wy_density=False):
     """ Computes fxc numerically using WY inversion and a target density matrix.
 
         :param dm_target: the target density matrix.
@@ -36,21 +36,31 @@ def compute_numerical_fxc(molecule, dm_target, coords, epsilon=5e-7, guide="Slat
     mw_plus = wy.RWY(molecule, dm_plus)
     mw_plus.guide = guide
     mw_plus.tol = 1e-6
-    mw_plus.method = 'SLSQP'
-    mw_plus.reg = 0.0
+    mw_plus.method = method
+    mw_plus.reg = regularization
     mw_plus.run()
-    
+    wy_dm_plus = mw_plus.dm   
+ 
     # WY minus
     mw_minus = wy.RWY(molecule, dm_minus)
     mw_minus.guide = guide
     mw_minus.tol = 1e-6
-    mw_minus.method = 'SLSQP'
-    mw_minus.reg = 0.0
-    
-    print("Finished!")
-    
+    mw_minus.method = method
+    mw_minus.reg = regularization
+    mw_minus.run()
+    wy_dm_minus = mw_minus.dm
+    print("Finished!")   
+ 
     # TODO: Extract data (! VG is extracted differently for LDA, GGA, and FA!!!)
-    # 
+    #
+    wy_dm_plus_on_grid = pyscf.dft.numint.eval_rho(molecule, ao_values,
+                                               wy_dm_plus, xctype='LDA')
+    wy_dm_minus_on_grid = pyscf.dft.numint.eval_rho(molecule, ao_values,
+                                               wy_dm_minus, xctype='LDA')
+    diff_wy_plus_mius = wy_dm_plus_on_grid - wy_dm_minus_on_grid
+    wy_delta_rho_on_grid = pyscf.dft.numint.eval_rho(molecule, ao_values,
+                                               wy_dm_plus - wy_dm_minus, xctype='LDA')
+
     vc_plus = np.einsum('t,rt->r', mw_minus.b, ao_values) # correction potential on grid
     vc_minus = np.einsum('t,rt->r', mw_minus.b, ao_values) # correction potential on grid
 
@@ -64,6 +74,11 @@ def compute_numerical_fxc(molecule, dm_target, coords, epsilon=5e-7, guide="Slat
                                                dm_minus, xctype='LDA')
         vg_plus = pyscf.dft.libxc.eval_xc(guide, dm_plus_on_grid)[1][0]
         vg_minus = pyscf.dft.libxc.eval_xc(guide, dm_minus_on_grid)[1][0]
+    elif xctype == "FAXC":
+        dmxc_plus = -1.0/molecule.nelectron * dm_plus
+        vg_plus = util.eval_vh(molecule, coords, dmxc_plus) # guiding potential on grid
+        dmxc_minus = -1.0/molecule.nelectron * dm_minus
+        vg_minus = util.eval_vh(molecule, coords, dmxc_minus) # guiding potential on grid
     else:
         raise NotImplementedError("Unrecognized xctype: %s." % xctype)
     # xctype = LDA because we need only the density and not the density gradient
@@ -71,10 +86,28 @@ def compute_numerical_fxc(molecule, dm_target, coords, epsilon=5e-7, guide="Slat
                                       delta_rho, xctype='LDA')
     
     # calculate fxc numerically; symmetric quotient
-    fxc_symm = (vg_plus + vc_plus - vg_minus - vc_minus) / (2 * delta_rho_on_grid)
-    
+    if wy_density:
+        fxc_symm = ( vg_plus + vc_plus - vg_minus - vc_minus ) / ( 2 * wy_delta_rho_on_grid)
+    else:
+        fxc_symm = (vg_plus + vc_plus - vg_minus - vc_minus) / (2 * delta_rho_on_grid)
+   
+    mw = wy.RWY(molecule, dm_target)
+    mw.guide = guide
+    mw.tol = 1e-6
+    mw.method = method
+    mw.reg = regularization
+    mw.run()
+
+    mo_energies = mw.mo_energy  # MO eigenvalues
+    mo_coeff = mw.mo_coeff    # MO coefficients
+ 
     return {
-        'fxc': fxc_symm
+        'fxc': fxc_symm,
+        'delta_rho_on_grid': delta_rho_on_grid,
+        'wy_delta_rho_on_grid_dm_diff': wy_delta_rho_on_grid,
+        'wy_delta_rho_on_grid_grid_diff': diff_wy_plus_mius,
+        'mo_energies': mo_energies,
+        'mo_coeff': mo_coeff,
         }
 
 def add_broadening(bge, bgi, line_param=0.1, line_profile="lorentzian",
