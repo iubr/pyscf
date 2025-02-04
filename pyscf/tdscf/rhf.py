@@ -726,6 +726,9 @@ class TDBase(lib.StreamObject):
         # other types of densities. The user-defined fxc should be
         # defined on the DFT grid.
         self.user_defined_fxc = None
+        # User defined one-particle density matrix to allow TDDFT
+        # calculations for other types of densities.
+        self.user_defined_dm0 = None
 
         self.wfnsym = None
 
