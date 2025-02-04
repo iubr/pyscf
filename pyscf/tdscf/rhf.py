@@ -114,7 +114,8 @@ def _get_x_sym_table(mf, cvs_space=None):
     else:
         return orbsym[cvs_space, None] ^ orbsym[mo_occ==0]
 
-def get_ab(mf, mo_energy=None, mo_coeff=None, mo_occ=None, cvs_space=None, user_defined_fxc=None):
+def get_ab(mf, mo_energy=None, mo_coeff=None, mo_occ=None, cvs_space=None, user_defined_fxc=None,
+           user_defined_dm0=None):
     r'''A and B matrices for TDDFT response function.
 
     A[i,a,j,b] = \delta_{ab}\delta_{ij}(E_a - E_i) + (ai||jb)
@@ -172,7 +173,11 @@ def get_ab(mf, mo_energy=None, mo_coeff=None, mo_occ=None, cvs_space=None, user_
                 b -= numpy.einsum('jaib->iajb', eri_mo[:nocc,nocc:,:nocc,nocc:]) * k_fac
 
         xctype = ni._xc_type(mf.xc)
-        dm0 = mf.make_rdm1(mo_coeff, mo_occ)
+
+        if user_defined_dm0 is None:
+            dm0 = mf.make_rdm1(mo_coeff, mo_occ)
+        else:
+            dm0 = user_defined_dm0
         make_rho = ni._gen_rho_evaluator(mol, dm0, hermi=1, with_lapl=False)[0]
         mem_now = lib.current_memory()[0]
         max_memory = max(2000, mf.max_memory*.8-mem_now)
@@ -702,7 +707,7 @@ class TDBase(lib.StreamObject):
     _keys = {
         'conv_tol', 'nstates', 'singlet', 'lindep', 'level_shift',
         'max_cycle', 'mol', 'chkfile', 'wfnsym', 'converged', 'e', 'xy',
-        'cvs_space', 'user_defined_fxc'
+        'cvs_space', 'user_defined_fxc', 'user_defined_dm0'
     }
 
     def __init__(self, mf):
@@ -783,7 +788,8 @@ class TDBase(lib.StreamObject):
     @lib.with_doc(get_ab.__doc__)
     def get_ab(self, mf=None):
         if mf is None: mf = self._scf
-        return get_ab(mf, cvs_space=self.cvs_space, user_defined_fxc=self.user_defined_fxc)
+        return get_ab(mf, cvs_space=self.cvs_space, user_defined_fxc=self.user_defined_fxc,
+                      user_defined_dm0=self.user_defined_dm0)
 
     def get_precond(self, hdiag):
         def precond(x, e, *args):

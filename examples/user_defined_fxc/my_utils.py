@@ -146,7 +146,7 @@ def add_broadening(bge, bgi, line_param=0.1, line_profile="lorentzian",
 
 def exact_diagonalization(pyscf_molecule, scf_gs,
                           tda=False, cvs_space=None,
-                          fxc=None):
+                          fxc=None, dm0=None):
     """ Computes the absorption spectrum using TDDFT.
 
         :param pyscf_molecule: the pyscf molecule object
@@ -154,6 +154,8 @@ def exact_diagonalization(pyscf_molecule, scf_gs,
         :param tda           : if to use the Tamm-Dancoff approximation.
         :param cvs_space     : a list of the core orbital indices
                                (for the CVS approximation).
+        :param fxc           : user-defined fxc represented on a grid.
+        :param dm0           : user-defined one-particle density matrix.
     """
 
     if tda:
@@ -162,6 +164,7 @@ def exact_diagonalization(pyscf_molecule, scf_gs,
         tdscf_drv = pyscf.tdscf.TDDFT(scf_gs)
 
     tdscf_drv.user_defined_fxc = fxc
+    tdscf_drv.user_defined_dm0 = dm0
 
     A, B = tdscf_drv.get_ab()
 
