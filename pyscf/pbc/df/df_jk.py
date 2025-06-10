@@ -45,6 +45,8 @@ def density_fit(mf, auxbasis=None, mesh=None, with_df=None):
             number of grids in each direction
         with_df : DF object
     '''
+    from pyscf.pbc.scf.hf import KohnShamDFT
+    from pyscf.df.addons import predefined_auxbasis
     from pyscf.pbc.df import df
     from pyscf.pbc.scf.khf import KSCF
     if with_df is None:
@@ -53,7 +55,19 @@ def density_fit(mf, auxbasis=None, mesh=None, with_df=None):
         else:
             kpts = numpy.reshape(mf.kpt, (1,3))
 
-        with_df = df.DF(mf.cell, kpts)
+        cell = mf.cell
+        if auxbasis is None and isinstance(cell.basis, str):
+            if isinstance(mf, KohnShamDFT):
+                xc = mf.xc
+            else:
+                xc = 'HF'
+            if xc == 'LDA,VWN':
+                # This is likely the default xc setting of a KS instance.
+                # Postpone the auxbasis assignment to with_df.build().
+                auxbasis = None
+            else:
+                auxbasis = predefined_auxbasis(cell, cell.basis, xc)
+        with_df = df.DF(cell, kpts)
         with_df.max_memory = mf.max_memory
         with_df.stdout = mf.stdout
         with_df.verbose = mf.verbose
@@ -280,8 +294,12 @@ def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=numpy.zeros((1,3)), kpts_band=None,
             log.warn('DF integrals for band k-points were not found %s. '
                      'DF integrals will be rebuilt to include band k-points.',
                      mydf._cderi)
-        mydf.build(kpts_band=kpts_band)
+        mydf.build(j_only=False, kpts_band=kpts_band)
         t0 = log.timer_debug1('Init get_k_kpts', *t0)
+    elif mydf._j_only:
+        log.warn('DF integrals for HF exchange were not initialized. '
+                 'df.j_only cannot be used with hybrid functional. DF integrals will be rebuilt.')
+        mydf.build(j_only=False, kpts_band=kpts_band)
 
     mo_coeff = getattr(dm_kpts, 'mo_coeff', None)
     if mo_coeff is not None:
