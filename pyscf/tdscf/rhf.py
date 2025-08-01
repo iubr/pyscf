@@ -52,7 +52,7 @@ def gen_tda_operation(mf, fock_ao=None, singlet=True, wfnsym=None, with_nlc=True
         with_nlc : boolean
             Whether to skip the NLC contribution
         cvs_space: list
-            The MO indices of core orbitals to compute X-ray absorption. 
+            The MO indices of core orbitals to compute X-ray absorption.
     '''
     td = TDA(mf)
     td.exclude_nlc = not with_nlc
