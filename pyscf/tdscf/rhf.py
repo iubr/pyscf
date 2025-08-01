@@ -144,7 +144,8 @@ def _get_x_sym_table(td):
     else:
         return orbsym[cvs_space, None] ^ orbsym[mo_occ==0]
 
-def get_ab(mf, mo_energy=None, mo_coeff=None, mo_occ=None, cvs_space=None):
+def get_ab(mf, frozen=None, mo_energy=None, mo_coeff=None, mo_occ=None,
+           cvs_space=None):
     r'''A and B matrices for TDDFT response function.
 
     A[i,a,j,b] = \delta_{ab}\delta_{ij}(E_a - E_i) + (ai||jb)
