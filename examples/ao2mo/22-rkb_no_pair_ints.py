@@ -10,7 +10,6 @@ from pyscf import gto
 from pyscf import scf
 from pyscf import lib
 from pyscf.ao2mo import r_outcore
-import tempfile
 import os
 
 mol = gto.M(
@@ -33,7 +32,6 @@ def no_pair_ovov(mol, mo_coeff, erifile):
     n2c = n4c // 2
     nNeg = nmo // 2
     nocc = mol.nelectron
-    nvir = nmo // 2 - nocc
     mo_pos_l = mo_coeff[:n2c,nNeg:]
     mo_pos_s = mo_coeff[n2c:,nNeg:] * (.5/c)
     Lo = mo_pos_l[:,:nocc]
@@ -54,7 +52,7 @@ def no_pair_ovov(mol, mo_coeff, erifile):
 
         def run_and_add(mol, mos, erifile, dataname_main, intor):
             # Use a temporary file for the intermediate integrals
-            with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as tmpfile:
+            with lib.NamedTemporaryFile(suffix=".h5", delete=False) as tmpfile:
                 tmp_erifile = tmpfile.name
 
             try:
@@ -82,6 +80,7 @@ def no_pair_ovov(mol, mo_coeff, erifile):
 no_pair_ovov(mol, mf.mo_coeff, 'dhf_ovov.h5')
 with h5py.File('dhf_ovov.h5', 'r') as f:
     nocc = mol.nelectron
+    nmo = mf.mo_coeff.shape[1]
     nvir = nmo // 2 - nocc
     print('Number of DHF occupied orbitals %s' % nocc)
     print('Number of DHF virtual orbitals in positive states %s' % nvir)

@@ -24,6 +24,7 @@ import os
 import ctypes
 import math
 import numpy
+import numpy as np
 import scipy.special
 from pyscf.lib import misc
 from numpy import asarray  # For backward compatibility
@@ -152,10 +153,16 @@ def contract(subscripts, A, B, alpha=1, beta=0, out=None, **kwargs):
     if A.size < EINSUM_MAX_SIZE or B.size < EINSUM_MAX_SIZE:
         return _numpy_einsum(idx_str, A, B, alpha=alpha, beta=beta, out=out)
 
+    C_dtype = numpy.result_type(A, B)
     if EINSUM_BACKEND == 'pytblis':
+        # pytblis cannot apply alpha/beta when it has to fall back to numpy
+        # tensordot, and it requires the output to share the IEEE type of the
+        # inputs. Route these cases through numpy instead.
+        if ((out is not None and out.dtype != C_dtype) or
+                numpy.result_type(C_dtype, alpha, beta) != C_dtype):
+            return _numpy_einsum(idx_str, A, B, alpha=alpha, beta=beta, out=out)
         return pytblis.contract(idx_str, A, B, alpha=alpha, beta=beta, out=out)
 
-    C_dtype = numpy.result_type(A, B)
     if EINSUM_BACKEND =='pyscf-tblis' and C_dtype == numpy.double:
         # tblis is slow for complex type
         return tblis_einsum.contract(idx_str, A, B, alpha=alpha, beta=beta, out=out)
@@ -355,6 +362,11 @@ def pack_tril(mat, axis=-1, out=None):
 
     else:  # pack the leading two dimension
         assert (axis == 0)
+        if mat.shape[0] != mat.shape[1]:
+            raise ValueError('pack_tril with axis=0 requires the leading '
+                              'two dimensions to be square, got shape %s'
+                              % (mat.shape,))
+        nd = mat.shape[0]
         out = mat[numpy.tril_indices(nd)]
         return out
 
@@ -404,10 +416,17 @@ def unpack_tril(tril, filltriu=HERMITIAN, axis=-1, out=None):
     if (tril.dtype != numpy.double and tril.dtype != numpy.complex128):
         out = numpy.ndarray(shape, tril.dtype, buffer=out)
         idx, idy = numpy.tril_indices(nd)
+        is_complex = numpy.iscomplexobj(tril)
         if filltriu == ANTIHERMI:
-            out[...,idy,idx] = -tril
+            if is_complex:
+                out[...,idy,idx] = -tril.conj()
+            else:
+                out[...,idy,idx] = -tril
         else:
-            out[...,idy,idx] = tril
+            if is_complex and filltriu == HERMITIAN:
+                out[...,idy,idx] = tril.conj()
+            else:
+                out[...,idy,idx] = tril
         out[...,idx,idy] = tril
         return out
 
@@ -1719,3 +1738,50 @@ def isin_1d(v, vs, return_index=False):
         if len(idx) == 1:
             idx = idx[0]
         return v_in_vs, idx
+
+def groupby(labels, a, op='argmin'):
+    '''Perform groupby(labels, a).op(). For example,
+    groupby(['A', 'A', 'B'], [1, 2, 3], 'min') => [1, 3]
+    '''
+    if 'min' in op:
+        a_order = a.argsort()
+        _, idx = np.unique(labels[a_order], return_index=True)
+        idx = a_order[idx]
+    elif 'max' in op:
+        a_order = a.argsort()[::-1]
+        _, idx = np.unique(labels[a_order], return_index=True)
+        idx = a_order[idx]
+    elif op == 'sum':
+        labels, inv = np.unique(labels, return_inverse=True)
+        if a.ndim == 1:
+            summed = np.bincount(inv, weights=a)
+        else:
+            summed = np.zeros((len(labels), *a.shape[1:]), dtype=a.dtype)
+            np.add.at(summed, inv, a)
+        return summed
+    else:
+        raise NotImplementedError
+
+    if 'arg' in op:
+        return idx
+    else:
+        return a[idx]
+
+def stack_with_padding(arrays):
+    '''
+    Stack orbital coefficients, padding zeros to smaller arrays
+    '''
+    if not arrays:
+        raise ValueError("arrays must be a non-empty sequence")
+
+    max_nmo = max(a.shape[1] for a in arrays)
+    nao = arrays[0].shape[0]
+    dtype = numpy.result_type(*arrays)
+    out = numpy.empty((len(arrays), nao, max_nmo), dtype=dtype)
+
+    for k, a in enumerate(arrays):
+        nmo = a.shape[1]
+        out[k,:,:nmo] = a
+        if nmo < max_nmo:
+            out[k,:,nmo:] = 0
+    return out
